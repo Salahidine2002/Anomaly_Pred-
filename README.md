@@ -16,4 +16,4 @@ pip install -r requirements.txt
 
 ### Code 
 
-We prepared a jupyter to demonstrate our approach and its different steps, however, the data used to run the code is just synthetic signals created to show the format of our original signals in the study. We tried to mimic the noise problems in the electrolyzers voltage signals that we described in the paper and shoe the different preprocessing steps we followed. 
+We prepared a jupyter to demonstrate our approach and its different steps, however, and for confidentiality reasons the data used to run the code is just synthetic signals created to show the format of our original signals in the study. We tried to mimic the noise problems in the electrolyzers voltage signals that we described in the paper and shoe the different preprocessing steps we followed. 
