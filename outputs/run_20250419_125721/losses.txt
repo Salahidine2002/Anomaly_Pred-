@@ -1,0 +1,28 @@
+Epoch 1:
+Train Loss: 170.027401, Train Signal Loss: 168.454924, Train KLD: 15.724773
+Val Loss: 165.330707, Val Signal Loss: 163.332157, Val KLD: 19.985507
+
+Epoch 2:
+Train Loss: 151.631644, Train Signal Loss: 149.128967, Train KLD: 25.026772
+Val Loss: 146.054154, Val Signal Loss: 143.660890, Val KLD: 23.932634
+
+Epoch 3:
+Train Loss: 145.242640, Train Signal Loss: 142.394124, Train KLD: 28.485161
+Val Loss: 144.246326, Val Signal Loss: 141.372261, Val KLD: 28.740650
+
+Epoch 4:
+Train Loss: 142.682610, Train Signal Loss: 139.606065, Train KLD: 30.765440
+Val Loss: 140.123396, Val Signal Loss: 137.049160, Val KLD: 30.742350
+
+Epoch 5:
+Train Loss: 141.156736, Train Signal Loss: 138.062435, Train KLD: 30.943009
+Val Loss: 139.802720, Val Signal Loss: 136.664018, Val KLD: 31.387024
+
+Epoch 6:
+Train Loss: 139.956388, Train Signal Loss: 136.877861, Train KLD: 30.785267
+Val Loss: 136.765896, Val Signal Loss: 133.758404, Val KLD: 30.074929
+
+Epoch 7:
+Train Loss: 138.532660, Train Signal Loss: 135.304723, Train KLD: 32.279369
+Val Loss: 138.870864, Val Signal Loss: 135.344471, Val KLD: 35.263927
+
