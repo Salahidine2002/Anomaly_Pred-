@@ -1,7 +1,8 @@
 import numpy as np
 import torch
 from torch.utils.data import Dataset, DataLoader
-from scipy import signal as scipy_signal
+# from scipy.signal import cwt as cwt_func
+from scipy import signal as scipy_signal 
 from pyts.image import MarkovTransitionField
 from pyts.image import GramianAngularField
 from sklearn.preprocessing import MinMaxScaler
@@ -189,8 +190,11 @@ class SyntheticSignalDataset(Dataset):
             transformations.append(mtf.fit_transform(signal_scaled)[0])
             
             # 2. Gramian Angular Field (GAF)
-            gaf = GramianAngularField(image_size=self.image_size, method='summation')
-            transformations.append(gaf.fit_transform(signal_scaled)[0])
+            gasf = GramianAngularField(image_size=self.image_size, method='summation')
+            transformations.append(gasf.fit_transform(signal_scaled)[0])
+
+            gadf = GramianAngularField(image_size=self.image_size, method='difference')
+            transformations.append(gadf.fit_transform(signal_scaled)[0])
             
             # 3. Recurrence Plot (RP)
             # Create recurrence plot using scipy's correlation
@@ -204,13 +208,13 @@ class SyntheticSignalDataset(Dataset):
             
             # 4. Continuous Wavelet Transform (CWT)
             # Using Morlet wavelet
-            scales = np.linspace(1, self.image_size, self.image_size)
-            cwt = scipy_signal.cwt(signal_scaled[0], scipy_signal.morlet2, scales)
-            cwt = np.abs(cwt)
+            # scales = np.linspace(1, self.image_size, self.image_size)
+            # cwt = cwt_func(signal_scaled[0], scipy_signal.morlet2, scales)
+            # cwt = np.abs(cwt)
             # Resize to match image size
-            cwt = scipy_signal.resample(cwt, self.image_size, axis=0)
-            cwt = scipy_signal.resample(cwt, self.image_size, axis=1)
-            transformations.append(cwt.reshape(self.image_size, self.image_size))
+            # cwt = scipy_signal.resample(cwt, self.image_size, axis=0)
+            # cwt = scipy_signal.resample(cwt, self.image_size, axis=1)
+            # transformations.append(cwt.reshape(self.image_size, self.image_size))
 
             # Combine all transformations
             image = np.array(transformations)

@@ -10,6 +10,7 @@ import logging
 from tqdm import tqdm
 from synthetic_gen import get_dataloader
 from torch.distributions import StudentT, MixtureSameFamily, Independent, Normal
+from torch.cuda.amp import autocast, GradScaler
 
 class VAE(nn.Module):
     def __init__(self, latent_dim=128, input_channels=4, image_size=64, signal_length=600, n_components=3):
@@ -491,10 +492,11 @@ def setup_logging(log_dir):
     )
     return log_file
 
+
 def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, log_dir, beta=1.0):
     """
-    Train the VAE model for signal reconstruction
-    
+    Train the VAE model for signal reconstruction with mixed precision
+
     Args:
         model: VAE or VAE1D model instance
         train_loader: training data loader
@@ -507,92 +509,91 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
     """
     model = model.to(device)
     best_val_loss = float('inf')
-    
+    scaler = GradScaler()  # For mixed precision
+
     # Determine model type
     is_1d_model = isinstance(model, VAE1D)
     input_key = 'signal' if is_1d_model else 'image'
     model_type = 'VAE1D' if is_1d_model else 'VAE'
-    
+
     # Create loss log file
     loss_log_file = os.path.join(log_dir, 'losses.txt')
     logging.info(f'Training {model_type} model')
-    
+
     for epoch in range(num_epochs):
         # Training phase
         model.train()
         train_loss = 0
         train_signal_loss = 0
         train_kld_loss = 0
-        
+
         with tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}') as pbar:
             for batch_idx, batch in enumerate(pbar):
-                # Get appropriate input data based on model type
-                data = batch[input_key].to(device)
-                signals = batch['signal'].to(device)
-                
+                data = batch[input_key].to(device, non_blocking=True)
+                signals = batch['signal'].to(device, non_blocking=True)
+
                 optimizer.zero_grad()
-                mixture_weights, locations, scales, dofs, mu, log_var, z = model(data)
-                
-                loss, signal_loss, kld_loss = model.loss_function(
-                    mixture_weights, locations, scales, dofs, signals, mu, log_var, beta
-                )
-                
-                loss.backward()
-                optimizer.step()
-                
+                with autocast():  # Mixed precision context
+                    mixture_weights, locations, scales, dofs, mu, log_var, z = model(data)
+                    loss, signal_loss, kld_loss = model.loss_function(
+                        mixture_weights, locations, scales, dofs, signals, mu, log_var, beta
+                    )
+
+                scaler.scale(loss).backward()       # Scaled backward
+                scaler.step(optimizer)              # Scaled optimizer step
+                scaler.update()                     # Update the scale for next iteration
+
                 train_loss += loss.item()
                 train_signal_loss += signal_loss.item()
                 train_kld_loss += kld_loss.item()
-                
+
                 pbar.set_postfix({
                     'loss': loss.item() / len(data),
                     'signal_loss': signal_loss.item() / len(data),
                     'kld_loss': kld_loss.item() / len(data)
                 })
-        
-        # Validation phase
+
+        # Validation phase (no autocast here — inference is safe in FP32)
         model.eval()
         val_loss = 0
         val_signal_loss = 0
         val_kld_loss = 0
-        
+
         with torch.no_grad():
             for batch in val_loader:
-                # Get appropriate input data based on model type
                 data = batch[input_key].to(device)
                 signals = batch['signal'].to(device)
-                
+
                 mixture_weights, locations, scales, dofs, mu, log_var, z = model(data)
                 loss, signal_loss, kld_loss = model.loss_function(
                     mixture_weights, locations, scales, dofs, signals, mu, log_var, beta
                 )
-                
+
                 val_loss += loss.item()
                 val_signal_loss += signal_loss.item()
                 val_kld_loss += kld_loss.item()
-        
-        # Calculate average losses
+
+        # Average losses
         train_loss /= len(train_loader.dataset)
         train_signal_loss /= len(train_loader.dataset)
         train_kld_loss /= len(train_loader.dataset)
         val_loss /= len(val_loader.dataset)
         val_signal_loss /= len(val_loader.dataset)
         val_kld_loss /= len(val_loader.dataset)
-        
+
         # Log losses
         with open(loss_log_file, 'a') as f:
             f.write(f'Epoch {epoch+1}:\n')
             f.write(f'Train Loss: {train_loss:.6f}, Train Signal Loss: {train_signal_loss:.6f}, Train KLD: {train_kld_loss:.6f}\n')
             f.write(f'Val Loss: {val_loss:.6f}, Val Signal Loss: {val_signal_loss:.6f}, Val KLD: {val_kld_loss:.6f}\n\n')
-        
+
         logging.info(f'Epoch {epoch+1}:')
         logging.info(f'Train Loss: {train_loss:.6f}, Train Signal Loss: {train_signal_loss:.6f}, Train KLD Loss: {train_kld_loss:.6f}')
         logging.info(f'Val Loss: {val_loss:.6f}, Val Signal Loss: {val_signal_loss:.6f}, Val KLD Loss: {val_kld_loss:.6f}')
-        
+
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            # Save model parameters along with the state dict
             model_params = {
                 'latent_dim': model.latent_dim,
                 'signal_length': model.signal_length,
@@ -603,13 +604,13 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
                     'input_channels': model.encoder[0].in_channels,
                     'image_size': model.image_size
                 })
-            
+
             torch.save({
                 'model_state_dict': model.state_dict(),
                 **model_params
             }, os.path.join(log_dir, 'best_model.pth'))
             logging.info('Saved best model')
-        
+
         # Save checkpoint
         torch.save({
             'epoch': epoch,
@@ -621,6 +622,7 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
             **model_params
         }, os.path.join(log_dir, f'checkpoint_epoch_{epoch+1}.pth'))
         logging.info(f'Saved checkpoint for epoch {epoch+1}')
+
 
 def main():
     parser = argparse.ArgumentParser(description='Train VAE model')
