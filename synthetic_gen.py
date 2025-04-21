@@ -266,6 +266,11 @@ class SyntheticSignalDataset(Dataset):
         
         # Transform to image
         image = self.transform_to_image(signal)
+
+        sigma = np.std(signal)
+        if not sigma: 
+            sigma = 1
+        signal = (signal-np.mean(signal))/sigma
         
         # Convert to tensors
         signal = torch.FloatTensor(signal)

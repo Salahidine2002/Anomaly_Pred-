@@ -9,14 +9,16 @@ from datetime import datetime
 import logging
 from tqdm import tqdm
 from synthetic_gen import get_dataloader
+from torch.distributions import StudentT, MixtureSameFamily, Independent, Normal
 
 class VAE(nn.Module):
-    def __init__(self, latent_dim=128, input_channels=4, image_size=64, signal_length=600):
+    def __init__(self, latent_dim=128, input_channels=4, image_size=64, signal_length=600, n_components=3):
         super(VAE, self).__init__()
         
         self.image_size = image_size
         self.signal_length = signal_length
         self.latent_dim = latent_dim
+        self.n_components = n_components
         
         # Encoder
         self.encoder = nn.Sequential(
@@ -46,14 +48,22 @@ class VAE(nn.Module):
         self.fc_mu = nn.Linear(self.flattened_size, latent_dim)
         self.fc_var = nn.Linear(self.flattened_size, latent_dim)
         
-        # Signal decoder (MLP from latent to signal)
-        self.signal_decoder = nn.Sequential(
+        # Enhanced decoder for mixture model parameters
+        self.decoder = nn.Sequential(
             nn.Linear(latent_dim, 512),
             nn.ReLU(),
-            nn.Linear(512, 256),
+            nn.Linear(512, 1024),
             nn.ReLU(),
-            nn.Linear(256, signal_length)
+            nn.Linear(1024, 2048),
+            nn.ReLU(),
         )
+        
+        # Output layers for mixture model parameters
+        # Each component needs: mixture weight, location, scale, and degrees of freedom
+        self.mixture_weights = nn.Linear(2048, n_components)
+        self.locations = nn.Linear(2048, n_components * signal_length)
+        self.scales = nn.Linear(2048, n_components * signal_length)
+        self.dofs = nn.Linear(2048, n_components)
         
     def encode(self, x):
         x = self.encoder(x)
@@ -67,43 +77,144 @@ class VAE(nn.Module):
         return mu + eps * std
     
     def decode(self, z):
-        # Only decode into signal
-        signal = self.signal_decoder(z)
-        return signal
+        # Get base features
+        x = self.decoder(z)
+        
+        # Get mixture model parameters
+        # Mixture weights (π)
+        logits = self.mixture_weights(x)
+        mixture_weights = F.softmax(logits, dim=-1)
+        
+        # Locations (μ)
+        locations = self.locations(x).view(-1, self.n_components, self.signal_length)
+        
+        # Scales (σ) - ensure positive
+        scales = F.softplus(self.scales(x)).view(-1, self.n_components, self.signal_length)
+        
+        # Degrees of freedom (ν) - ensure > 2
+        dofs = F.softplus(self.dofs(x)) + 2.0
+        
+        return mixture_weights, locations, scales, dofs
     
     def forward(self, x):
         mu, log_var = self.encode(x)
         z = self.reparameterize(mu, log_var)
-        recon_signal = self.decode(z)
-        return recon_signal, mu, log_var, z
+        mixture_weights, locations, scales, dofs = self.decode(z)
+        return mixture_weights, locations, scales, dofs, mu, log_var, z
     
-    def loss_function(self, recon_signal, signal, mu, log_var, beta=1.0):
+    def create_mixture_distribution(self, mixture_weights, locations, scales, dofs):
         """
-        Computes the VAE loss function for signal reconstruction only.
+        Creates a mixture of Student's t distributions from the given parameters.
         
         Args:
-            recon_signal: reconstructed signal
-            signal: original signal
+            mixture_weights: mixture component weights [batch_size, n_components]
+            locations: location parameters for each component [batch_size, n_components, signal_length]
+            scales: scale parameters for each component [batch_size, n_components, signal_length]
+            dofs: degrees of freedom for each component [batch_size, n_components]
+            
+        Returns:
+            MixtureSameFamily distribution
+        """
+        # Create mixture distribution
+        mixture = MixtureSameFamily(
+            torch.distributions.Categorical(mixture_weights),
+            torch.distributions.Independent(
+                torch.distributions.StudentT(
+                    df=dofs.unsqueeze(-1).expand(-1, -1, self.signal_length),
+                    loc=locations,
+                    scale=scales
+                ),
+                1
+            )
+        )
+        return mixture
+
+    def sample_from_mixture(self, mixture, num_samples=1):
+        """
+        Samples from a mixture distribution.
+        
+        Args:
+            mixture: MixtureSameFamily distribution
+            num_samples: number of samples to generate
+            
+        Returns:
+            samples from the mixture distribution
+        """
+        return mixture.sample((num_samples,))
+
+    def loss_function(self, mixture_weights, locations, scales, dofs, target, mu, log_var, beta=1.0):
+        """
+        Computes the VAE loss function using Student's t mixture model.
+        
+        Args:
+            mixture_weights: mixture component weights
+            locations: location parameters for each component
+            scales: scale parameters for each component
+            dofs: degrees of freedom for each component
+            target: target signal
             mu: mean of latent distribution
             log_var: log variance of latent distribution
             beta: weight for KL divergence term
             
         Returns:
-            (loss, signal_loss, KLD)
+            (loss, reconstruction_loss, KLD)
         """
-        # Signal reconstruction loss (MSE)
-        signal_loss = F.mse_loss(recon_signal, signal, reduction='sum')
+        # Create mixture distribution
+        mixture = self.create_mixture_distribution(mixture_weights, locations, scales, dofs)
+        
+        # Compute negative log likelihood
+        nll = -mixture.log_prob(target)
+        reconstruction_loss = nll.mean()
         
         # KL divergence loss
         KLD = -0.5 * torch.sum(1 + log_var - mu.pow(2) - log_var.exp())
         
         # Total loss
-        loss = signal_loss + beta * KLD
-        return loss, signal_loss, KLD
+        loss = reconstruction_loss + beta * KLD
+        return loss, reconstruction_loss, KLD
     
+    def predict_signals(self, batch, num_samples=1, return_mean=False):
+        """
+        Takes a batch of inputs, computes the output distribution, and returns either samples or mean.
+        
+        Args:
+            batch: dictionary containing 'image' tensor
+            num_samples: number of samples to generate per input (ignored if return_mean=True)
+            return_mean: if True, returns the distribution mean instead of samples
+            
+        Returns:
+            if return_mean:
+                mean_signals: tensor of shape [batch_size, signal_length]
+                mixture_params: tuple containing (mixture_weights, locations, scales, dofs)
+            else:
+                sampled_signals: tensor of shape [batch_size, num_samples, signal_length]
+                mixture_params: tuple containing (mixture_weights, locations, scales, dofs)
+        """
+        with torch.no_grad():
+            # Get model outputs
+            mixture_weights, locations, scales, dofs, mu, log_var, z = self(batch['image'])
+            
+            if return_mean:
+                # Compute weighted mean across components
+                # mixture_weights: [batch_size, n_components]
+                # locations: [batch_size, n_components, signal_length]
+                mean_signals = torch.sum(mixture_weights.unsqueeze(-1) * locations, dim=1)
+                return mean_signals
+            else:
+                # Create mixture distribution
+                mixture = self.create_mixture_distribution(mixture_weights, locations, scales, dofs)
+                
+                # Sample from the mixture
+                samples = self.sample_from_mixture(mixture, num_samples)
+                
+                # Reshape samples to [batch_size, num_samples, signal_length]
+                samples = samples.view(-1, num_samples, self.signal_length)
+                
+                return samples
+
     def generate(self, num_samples=1, device='cuda'):
         """
-        Generate signals from the latent space.
+        Generate signals from random latent vectors using the mixture model.
         
         Args:
             num_samples: number of samples to generate
@@ -114,8 +225,253 @@ class VAE(nn.Module):
         """
         with torch.no_grad():
             z = torch.randn(num_samples, self.latent_dim).to(device)
-            signals = self.decode(z)
-        return signals
+            mixture_weights, locations, scales, dofs = self.decode(z)
+            
+            # Create mixture distribution
+            mixture = self.create_mixture_distribution(mixture_weights, locations, scales, dofs)
+            
+            # Sample from the mixture
+            samples = self.sample_from_mixture(mixture)
+        return samples
+
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, device='cuda'):
+        """
+        Load a VAE model from a saved checkpoint.
+        
+        Args:
+            checkpoint_path: path to the saved checkpoint file
+            device: device to load the model on
+            
+        Returns:
+            loaded model and optimizer
+        """
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Extract model parameters from checkpoint
+        model_params = {
+            'latent_dim': checkpoint.get('latent_dim', 128),
+            'input_channels': checkpoint.get('input_channels', 4),
+            'image_size': checkpoint.get('image_size', 64),
+            'signal_length': checkpoint.get('signal_length', 600),
+            'n_components': checkpoint.get('n_components', 3)
+        }
+        
+        # Create model instance
+        model = cls(**model_params)
+        
+        # Load model state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model = model.to(device)
+        
+        # Create and load optimizer state if available
+        optimizer = None
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer = torch.optim.Adam(model.parameters())
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Log loading information
+        logging.info(f'Loaded model from checkpoint: {checkpoint_path}')
+        logging.info(f'Model parameters: {model_params}')
+        if optimizer:
+            logging.info('Optimizer state loaded')
+        
+        return model, optimizer
+
+class VAE1D(nn.Module):
+    def __init__(self, latent_dim=128, signal_length=600, n_components=3):
+        super(VAE1D, self).__init__()
+        
+        self.signal_length = signal_length
+        self.latent_dim = latent_dim
+        self.n_components = n_components
+        
+        # 1D Encoder
+        self.encoder = nn.Sequential(
+            # Layer 1: signal_length -> signal_length/4
+            nn.Conv1d(1, 64, kernel_size=8, stride=4, padding=2),
+            nn.BatchNorm1d(64),
+            nn.ReLU(),
+            
+            # Layer 2: signal_length/4 -> signal_length/16
+            nn.Conv1d(64, 128, kernel_size=8, stride=4, padding=2),
+            nn.BatchNorm1d(128),
+            nn.ReLU(),
+            
+            # Layer 3: signal_length/16 -> signal_length/64
+            nn.Conv1d(128, 256, kernel_size=8, stride=4, padding=2),
+            nn.BatchNorm1d(256),
+            nn.ReLU(),
+            
+            # Layer 4: signal_length/64 -> signal_length/256
+            nn.Conv1d(256, 512, kernel_size=8, stride=4, padding=2),
+            nn.BatchNorm1d(512),
+            nn.ReLU(),
+            
+            nn.Flatten()
+        )
+        
+        # Calculate the size of flattened features from encoder
+        self.flattened_size = 512 * (signal_length // 256)  # Due to 4 layers of stride 4
+        
+        # Latent space projections
+        self.fc_mu = nn.Linear(self.flattened_size, latent_dim)
+        self.fc_var = nn.Linear(self.flattened_size, latent_dim)
+        
+        # Enhanced decoder for mixture model parameters (same as original VAE)
+        self.decoder = nn.Sequential(
+            nn.Linear(latent_dim, 512),
+            nn.ReLU(),
+            nn.Linear(512, 1024),
+            nn.ReLU(),
+            nn.Linear(1024, 2048),
+            nn.ReLU(),
+        )
+        
+        # Output layers for mixture model parameters (same as original VAE)
+        self.mixture_weights = nn.Linear(2048, n_components)
+        self.locations = nn.Linear(2048, n_components * signal_length)
+        self.scales = nn.Linear(2048, n_components * signal_length)
+        self.dofs = nn.Linear(2048, n_components)
+        
+    def encode(self, x):
+        # Reshape input to [batch_size, channels=1, signal_length]
+        x = x.unsqueeze(1)  # Add channel dimension
+        x = self.encoder(x)
+        mu = self.fc_mu(x)
+        log_var = self.fc_var(x)
+        return mu, log_var
+    
+    def reparameterize(self, mu, log_var):
+        std = torch.exp(0.5 * log_var)
+        eps = torch.randn_like(std)
+        return mu + eps * std
+    
+    def decode(self, z):
+        # Same as original VAE
+        x = self.decoder(z)
+        
+        # Get mixture model parameters
+        logits = self.mixture_weights(x)
+        mixture_weights = F.softmax(logits, dim=-1)
+        
+        locations = self.locations(x).view(-1, self.n_components, self.signal_length)
+        scales = F.softplus(self.scales(x)).view(-1, self.n_components, self.signal_length)
+        dofs = F.softplus(self.dofs(x)) + 2.0
+        
+        return mixture_weights, locations, scales, dofs
+    
+    def forward(self, x):
+        mu, log_var = self.encode(x)
+        z = self.reparameterize(mu, log_var)
+        mixture_weights, locations, scales, dofs = self.decode(z)
+        return mixture_weights, locations, scales, dofs, mu, log_var, z
+    
+    # Reuse the same distribution-related methods from original VAE
+    create_mixture_distribution = VAE.create_mixture_distribution
+    sample_from_mixture = VAE.sample_from_mixture
+    loss_function = VAE.loss_function
+    
+    def predict_signals(self, batch, num_samples=1, return_mean=False):
+        """
+        Takes a batch of inputs, computes the output distribution, and returns either samples or mean.
+        
+        Args:
+            batch: dictionary containing 'signal' tensor
+            num_samples: number of samples to generate per input (ignored if return_mean=True)
+            return_mean: if True, returns the distribution mean instead of samples
+            
+        Returns:
+            if return_mean:
+                mean_signals: tensor of shape [batch_size, signal_length]
+            else:
+                sampled_signals: tensor of shape [batch_size, num_samples, signal_length]
+        """
+        with torch.no_grad():
+            # Get model outputs
+            mixture_weights, locations, scales, dofs, mu, log_var, z = self(batch['signal'])
+            
+            if return_mean:
+                # Compute weighted mean across components
+                mean_signals = torch.sum(mixture_weights.unsqueeze(-1) * locations, dim=1)
+                return mean_signals
+            else:
+                # Create mixture distribution
+                mixture = self.create_mixture_distribution(mixture_weights, locations, scales, dofs)
+                
+                # Sample from the mixture
+                samples = self.sample_from_mixture(mixture, num_samples)
+                
+                # Reshape samples to [batch_size, num_samples, signal_length]
+                samples = samples.view(-1, num_samples, self.signal_length)
+                
+                return samples
+    
+    def generate(self, num_samples=1, device='cuda'):
+        """
+        Generate signals from random latent vectors using the mixture model.
+        
+        Args:
+            num_samples: number of samples to generate
+            device: device to generate samples on
+            
+        Returns:
+            generated signals
+        """
+        with torch.no_grad():
+            z = torch.randn(num_samples, self.latent_dim).to(device)
+            mixture_weights, locations, scales, dofs = self.decode(z)
+            
+            # Create mixture distribution
+            mixture = self.create_mixture_distribution(mixture_weights, locations, scales, dofs)
+            
+            # Sample from the mixture
+            samples = self.sample_from_mixture(mixture)
+        return samples
+    
+    @classmethod
+    def load_from_checkpoint(cls, checkpoint_path, device='cuda'):
+        """
+        Load a VAE1D model from a saved checkpoint.
+        
+        Args:
+            checkpoint_path: path to the saved checkpoint file
+            device: device to load the model on
+            
+        Returns:
+            loaded model and optimizer
+        """
+        # Load checkpoint
+        checkpoint = torch.load(checkpoint_path, map_location=device)
+        
+        # Extract model parameters from checkpoint
+        model_params = {
+            'latent_dim': checkpoint.get('latent_dim', 128),
+            'signal_length': checkpoint.get('signal_length', 600),
+            'n_components': checkpoint.get('n_components', 3)
+        }
+        
+        # Create model instance
+        model = cls(**model_params)
+        
+        # Load model state
+        model.load_state_dict(checkpoint['model_state_dict'])
+        model = model.to(device)
+        
+        # Create and load optimizer state if available
+        optimizer = None
+        if 'optimizer_state_dict' in checkpoint:
+            optimizer = torch.optim.Adam(model.parameters())
+            optimizer.load_state_dict(checkpoint['optimizer_state_dict'])
+        
+        # Log loading information
+        logging.info(f'Loaded model from checkpoint: {checkpoint_path}')
+        logging.info(f'Model parameters: {model_params}')
+        if optimizer:
+            logging.info('Optimizer state loaded')
+        
+        return model, optimizer
 
 def setup_logging(log_dir):
     """Setup logging configuration"""
@@ -136,12 +492,30 @@ def setup_logging(log_dir):
     return log_file
 
 def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, log_dir, beta=1.0):
-    """Train the VAE model for signal reconstruction"""
+    """
+    Train the VAE model for signal reconstruction
+    
+    Args:
+        model: VAE or VAE1D model instance
+        train_loader: training data loader
+        val_loader: validation data loader
+        optimizer: optimizer instance
+        num_epochs: number of epochs to train
+        device: device to train on
+        log_dir: directory to save logs and checkpoints
+        beta: weight for KL divergence term
+    """
     model = model.to(device)
     best_val_loss = float('inf')
     
+    # Determine model type
+    is_1d_model = isinstance(model, VAE1D)
+    input_key = 'signal' if is_1d_model else 'image'
+    model_type = 'VAE1D' if is_1d_model else 'VAE'
+    
     # Create loss log file
     loss_log_file = os.path.join(log_dir, 'losses.txt')
+    logging.info(f'Training {model_type} model')
     
     for epoch in range(num_epochs):
         # Training phase
@@ -152,14 +526,15 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
         
         with tqdm(train_loader, desc=f'Epoch {epoch+1}/{num_epochs}') as pbar:
             for batch_idx, batch in enumerate(pbar):
-                data = batch['image'].to(device)
+                # Get appropriate input data based on model type
+                data = batch[input_key].to(device)
                 signals = batch['signal'].to(device)
                 
                 optimizer.zero_grad()
-                recon_signal, mu, log_var, z = model(data)
+                mixture_weights, locations, scales, dofs, mu, log_var, z = model(data)
                 
                 loss, signal_loss, kld_loss = model.loss_function(
-                    recon_signal, signals, mu, log_var, beta
+                    mixture_weights, locations, scales, dofs, signals, mu, log_var, beta
                 )
                 
                 loss.backward()
@@ -183,12 +558,13 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
         
         with torch.no_grad():
             for batch in val_loader:
-                data = batch['image'].to(device)
+                # Get appropriate input data based on model type
+                data = batch[input_key].to(device)
                 signals = batch['signal'].to(device)
                 
-                recon_signal, mu, log_var, z = model(data)
+                mixture_weights, locations, scales, dofs, mu, log_var, z = model(data)
                 loss, signal_loss, kld_loss = model.loss_function(
-                    recon_signal, signals, mu, log_var, beta
+                    mixture_weights, locations, scales, dofs, signals, mu, log_var, beta
                 )
                 
                 val_loss += loss.item()
@@ -216,19 +592,35 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
         # Save best model
         if val_loss < best_val_loss:
             best_val_loss = val_loss
-            torch.save(model.state_dict(), os.path.join(log_dir, 'best_model.pth'))
+            # Save model parameters along with the state dict
+            model_params = {
+                'latent_dim': model.latent_dim,
+                'signal_length': model.signal_length,
+                'n_components': model.n_components
+            }
+            if not is_1d_model:
+                model_params.update({
+                    'input_channels': model.encoder[0].in_channels,
+                    'image_size': model.image_size
+                })
+            
+            torch.save({
+                'model_state_dict': model.state_dict(),
+                **model_params
+            }, os.path.join(log_dir, 'best_model.pth'))
             logging.info('Saved best model')
         
         # Save checkpoint
-        if (epoch + 1) % 10 == 0:
-            torch.save({
-                'epoch': epoch,
-                'model_state_dict': model.state_dict(),
-                'optimizer_state_dict': optimizer.state_dict(),
-                'train_loss': train_loss,
-                'val_loss': val_loss,
-            }, os.path.join(log_dir, f'checkpoint_epoch_{epoch+1}.pth'))
-            logging.info(f'Saved checkpoint for epoch {epoch+1}')
+        torch.save({
+            'epoch': epoch,
+            'model_state_dict': model.state_dict(),
+            'optimizer_state_dict': optimizer.state_dict(),
+            'train_loss': train_loss,
+            'val_loss': val_loss,
+            'model_type': model_type,
+            **model_params
+        }, os.path.join(log_dir, f'checkpoint_epoch_{epoch+1}.pth'))
+        logging.info(f'Saved checkpoint for epoch {epoch+1}')
 
 def main():
     parser = argparse.ArgumentParser(description='Train VAE model')

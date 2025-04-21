@@ -1,6 +1,0 @@
-2025-04-19 14:32:17,453 - INFO - Using device: cpu
-2025-04-19 14:32:17,454 - INFO - Generating synthetic data...
-2025-04-19 14:32:17,456 - INFO - Generated 80000 training samples and 20000 validation samples
-2025-04-19 14:32:17,935 - INFO - Training completed
-2025-04-19 14:33:14,411 - INFO - Loading model from ./outputs/run_20250419_125721/best_model.pth
-2025-04-19 14:33:14,423 - INFO - Model loaded successfully
