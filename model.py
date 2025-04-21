@@ -623,6 +623,8 @@ def train_model(model, train_loader, val_loader, optimizer, num_epochs, device, 
         }, os.path.join(log_dir, f'checkpoint_epoch_{epoch+1}.pth'))
         logging.info(f'Saved checkpoint for epoch {epoch+1}')
 
+        return model
+
 
 def main():
     parser = argparse.ArgumentParser(description='Train VAE model')
