@@ -1,22 +1,86 @@
 # Failure Prediction in Electrolyzers with Interpretable Image-Based Deep Learning and Unsupervised Domain Adaptation
 
-### Abstract:
- Accurate and timely failure prediction in industrial electrolysis systems is crucial for minimizing downtime, reducing maintenance costs, and ensuring operational efficiency. This paper presents a novel machine-learning approach for failure prediction in analyzing steam electrolyzers. It transforms time series data into multi-channel 2D images, enabling the application of advanced deep learning techniques. Our method employs a Variational AutoEncoder (VAE) to encode these images and reconstruct the original signals, effectively capturing relevant features. We incorporate an Unsupervised Domain Adaptation (UDA) technique to enhance robustness and adaptability across diverse datasets, ensuring the model can generalize well to various operational conditions. Additionally, we improve interpretability by integrating a counterfactual explanation module that identifies minimal changes in input signals needed to alter prediction outcomes. Our comprehensive approach significantly advances predictive accuracy on target domains of unseen datasets, achieving over a $20\%$ accuracy gain and superior reconstruction results with $39\%$ less mean absolute percentage error compared to direct supervised training approaches. This results in $90.8\%$ accuracy and $19.2\%$ mean absolute percentage error.  Our method produces plausible counterfactual observations, highlighting the symptoms of failures in electrolyzers.
+## 📄 Abstract
 
+We propose a scalable deep learning framework for failure prediction in industrial electrolyzers, transforming high-dimensional time-series data into structured multi-channel 2D representations suitable for convolutional neural networks. Central to our approach is a Variational AutoEncoder (VAE) that learns latent representations for effective anomaly detection. To enhance generalization across diverse operational settings, we integrate an Unsupervised Domain Adaptation (UDA) mechanism, facilitating robust model transferability across different electrolyzer configurations.
 
-### Pipeline:
+To address the interpretability challenge, we incorporate a counterfactual explanation module that identifies minimal perturbations in input signals required to alter prediction outcomes, aiding transparent failure diagnosis. Evaluations on multiple industrial datasets demonstrate a $25\%$ improvement in accuracy over direct supervised training approaches, achieving $89.91\%$ accuracy with only $11.07\%$ Symmetric Mean Absolute Percentage Error (sMAPE). Compared to baseline machine learning models, our method reduces reconstruction error by $50\%$, effectively capturing underlying failure patterns.
 
-![pipeline](docs/pipeline.PNG)
+By leveraging multi-modal time-series representations, robust domain adaptation, and interpretable deep learning, our framework offers a generalizable solution for failure prediction in industrial systems, with potential applicability to a wide range of high-variance time-series anomaly detection tasks.
 
-### Setup 
+---
 
-```Shell
+## 🔥 Pipeline Overview
+
+<p align="center">
+  <img src="docs/pipeline.PNG" width="80%">
+</p>
+
+---
+
+## ⚙️ Installation
+
+Clone the repository:
+
+```bash
+git clone https://github.com/Salahidine2002/Anomaly_Pred-
+cd Anomaly_Pred-
+```
+
+Install the required dependencies:
+
+```bash
 pip install -r requirements.txt
 ```
 
-### Code 
+---
 
-We prepared a jupyter to demonstrate our approach and its different steps, however, and for confidentiality reasons the data used to run the code is just synthetic signals created to show the format of our original signals in the study. We tried to mimic the noise problems in the electrolyzers voltage signals that we described in the paper and shoe the different preprocessing steps we followed. 
+## 🚀 How to Run
 
+We provide a Jupyter Notebook that demonstrates the full pipeline:
+- Data preprocessing
+- Noise evolution signal generation
+- Image transformations (GASF, GADF, MTF)
+- Training the VAE model
+- Applying UDA for domain adaptation
+- Generating counterfactual explanations
 
-### Test 
+**Note:**  
+The data provided is synthetic and was generated to replicate the characteristics of real-world electrolyzer voltage signals (e.g., noise patterns, failure symptoms) as described in the paper.  
+The code structure and methodology remain identical to those used on real industrial datasets.
+
+---
+
+## 🧪 Testing
+
+You can test the complete pipeline using the synthetic dataset provided.  
+The notebooks guide you step-by-step through:
+- Data loading
+- Preprocessing
+- Model training
+- Evaluation
+
+---
+
+## 📚 Citation
+
+If you use this code or find our work useful, please cite:
+
+```bibtex
+@inproceedings{,
+  title={Failure Prediction in Electrolyzers with Interpretable Image-Based Deep Learning and Unsupervised Domain Adaptation},
+  author={Chater, Oumaima and Lemaachi, Salahidine and Longobardi, Alessia and Bugiotti, Francesca and Herrmann, Yan and Wlodarczyk, Sylvain and Aicart, Jerome and Mougin, Julie},
+  booktitle={Proceedings of the 27th European Conference on Artificial Intelligence (ECAI)},
+  year={}
+}
+```
+
+---
+
+## 📬 Contact
+
+For questions or collaborations, feel free to contact:  
+- [Oumaima Chater](mailto:oumaima.chaterconnect@gmail.com)  
+- [Salahidine Lemaachi](mailto:lemaachi.salah@gmail.com)
+
+---
